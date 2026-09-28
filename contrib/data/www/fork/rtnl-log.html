@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unbekannte Box-Meldungen</title>
+<style>
+  :root { --bg:#fff; --fg:#1f1f1f; --muted:#6b6b6b; --line:#e3e3e3; --head:#f5f5f5; --accent:#1677ff; --danger:#d4380d; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141414; --fg:#e6e6e6; --muted:#9a9a9a; --line:#303030; --head:#1f1f1f; --accent:#4096ff; --danger:#ff7a45; } }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, sans-serif; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  p.hint { color:var(--muted); margin:0 0 12px; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+  button, select, input { font:inherit; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:var(--head); color:var(--fg); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--danger); }
+  h2 { font-size:15px; margin:16px 0 6px; }
+  .wrap { overflow-x:auto; border:1px solid var(--line); border-radius:6px; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { padding:4px 8px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; vertical-align:top; }
+  th { background:var(--head); position:sticky; top:0; }
+  td.mono { font-family:ui-monospace, monospace; font-size:12px; white-space:normal; word-break:break-all; min-width:240px; }
+  tr.sel td { background:color-mix(in srgb, var(--accent) 15%, transparent); }
+  .muted { color:var(--muted); }
+</style>
+</head>
+<body>
+<h1>Unbekannte Box-Meldungen (RTNL)</h1>
+<p class="hint">Meldungen der Tonieboxen, die TeddyCloud nicht auswertet. Datei: <code>config/rtnl_unknown.log</code> (max. 2 × 1 MB).</p>
+
+<div class="bar">
+  <label>Box <select id="box"><option value="">alle</option></select></label>
+  <label><input type="checkbox" id="auto"> alle 10 s aktualisieren</label>
+  <button class="primary" id="reload">Aktualisieren</button>
+  <button id="download">Herunterladen</button>
+  <button class="danger" id="clear">Log leeren</button>
+  <span class="muted" id="status"></span>
+</div>
+
+<h2>Übersicht nach Gruppe/Funktion</h2>
+<div class="wrap"><table id="summary"><thead><tr>
+  <th>Typ</th><th>Gruppe</th><th>Funktion</th><th>Anzahl</th><th>Boxen</th><th>Zuletzt</th><th>Beispiel (hex)</th>
+</tr></thead><tbody></tbody></table></div>
+
+<h2>Letzte Meldungen <span class="muted" id="filterInfo"></span></h2>
+<div class="wrap"><table id="rows"><thead><tr>
+  <th>Zeit</th><th>Box</th><th>Typ</th><th>Gruppe</th><th>Funktion</th><th>Uptime</th><th>Länge</th><th>Payload (hex)</th><th>ASCII</th>
+</tr></thead><tbody></tbody></table></div>
+
+<script>
+(function () {
+  "use strict";
+  const API = "/api/fork/rtnl/log";
+  const MAX_ROWS = 500;
+  let raw = "", entries = [], filterKey = "", timer = null;
+  const $ = (id) => document.getElementById(id);
+
+  function parse(text) {
+    const out = [];
+    for (const line of text.split(/\r?\n/)) {
+      if (!line || line.startsWith("time\t")) continue;
+      const c = line.split("\t");
+      out.push({ time:c[0], cn:c[1], name:c[2], type:c[3], group:c[4], func:c[5], uptime:c[6],
+                 seq:c[7], len:c[9], hex:c[10], ascii:c[11] });
+    }
+    return out;
+  }
+
+  function td(text, cls) { const e = document.createElement("td"); e.textContent = text ?? ""; if (cls) e.className = cls; return e; }
+  function boxLabel(e) { return e.name ? e.name + " (" + e.cn + ")" : e.cn; }
+
+  function render() {
+    const box = $("box").value;
+    const list = entries.filter((e) => !box || e.cn === box);
+
+    const groups = new Map();
+    for (const e of list) {
+      const k = e.type + "|" + e.group + "|" + e.func;
+      const g = groups.get(k) || { e, count:0, boxes:new Set(), last:e };
+      g.count++; g.boxes.add(e.cn); g.last = e;
+      groups.set(k, g);
+    }
+    const sb = $("summary").tBodies[0]; sb.replaceChildren();
+    [...groups.entries()].sort((a, b) => b[1].count - a[1].count).forEach(([k, g]) => {
+      const tr = document.createElement("tr");
+      if (k === filterKey) tr.className = "sel";
+      tr.style.cursor = "pointer";
+      tr.title = "Klicken, um nur diese Meldungen zu zeigen";
+      tr.onclick = () => { filterKey = filterKey === k ? "" : k; render(); };
+      tr.append(td(g.e.type), td(g.e.group), td(g.e.func), td(g.count), td(g.boxes.size), td(g.last.time), td(g.last.hex, "mono"));
+      sb.append(tr);
+    });
+
+    const rows = list.filter((e) => !filterKey || (e.type + "|" + e.group + "|" + e.func) === filterKey).slice(-MAX_ROWS).reverse();
+    $("filterInfo").textContent = (filterKey ? "(gefiltert: " + filterKey.replace(/\|/g, " / ") + ") " : "") + "– " + rows.length + " von " + list.length;
+    const rb = $("rows").tBodies[0]; rb.replaceChildren();
+    for (const e of rows) {
+      const tr = document.createElement("tr");
+      tr.append(td(e.time), td(boxLabel(e)), td(e.type), td(e.group), td(e.func), td(e.uptime), td(e.len), td(e.hex, "mono"), td(e.ascii, "mono"));
+      rb.append(tr);
+    }
+  }
+
+  function fillBoxes() {
+    const sel = $("box"), cur = sel.value;
+    const boxes = new Map(entries.map((e) => [e.cn, boxLabel(e)]));
+    sel.replaceChildren(new Option("alle", ""));
+    for (const [cn, label] of boxes) sel.append(new Option(label, cn));
+    sel.value = boxes.has(cur) ? cur : "";
+  }
+
+  async function load() {
+    $("status").textContent = "lädt …";
+    try {
+      const r = await fetch(API, { cache:"no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      raw = await r.text();
+      entries = parse(raw);
+      fillBoxes(); render();
+      $("status").textContent = entries.length + " Meldungen, Stand " + new Date().toLocaleTimeString();
+    } catch (err) {
+      $("status").textContent = "Fehler: " + err.message;
+    }
+  }
+
+  $("reload").onclick = load;
+  $("box").onchange = render;
+  $("auto").onchange = (ev) => { clearInterval(timer); if (ev.target.checked) timer = setInterval(load, 10000); };
+  $("download").onclick = () => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([raw], { type:"text/plain" }));
+    a.download = "rtnl_unknown_" + new Date().toISOString().replace(/[:.]/g, "-") + ".tsv";
+    a.click(); URL.revokeObjectURL(a.href);
+  };
+  $("clear").onclick = async () => {
+    if (!confirm("Log wirklich leeren?")) return;
+    await fetch("/api/fork/rtnl/clear", { method:"POST" });
+    filterKey = ""; load();
+  };
+  load();
+})();
+</script>
+</body>
+</html>

@@ -7,6 +7,7 @@
 #include "mutex_manager.h"
 #include "handler_sse.h"
 #include "handler_rtnl.h"
+#include "handler_rtnl_fork.h"
 #include "settings.h"
 #include "stats.h"
 #include "mqtt.h"
@@ -136,6 +137,7 @@ error_t handleRtnl(HttpConnection *connection, const char_t *uri, const char_t *
             rtnlEvent(connection, rpc, client_ctx);
             rtnlEventLog(connection, rpc);
             rtnlEventDump(connection, rpc, client_ctx->settings);
+            rtnlForkLogUnknown(rpc, client_ctx);
         }
         tonie_rtnl_rpc__free_unpacked(rpc, NULL);
     } while (true);

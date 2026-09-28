@@ -1,0 +1,10 @@
+{
+  "pluginName": "Unbekannte Box-Meldungen",
+  "author": "starlight071986",
+  "version": "1.0.0",
+  "description": "Zeigt RTNL-Meldungen der Tonieboxen, die TeddyCloud nicht auswertet (config/rtnl_unknown.log).",
+  "standalone": false,
+  "pluginHomepage": "https://github.com/starlight071986/teddycloud",
+  "teddyCloudSection": "tonieboxes",
+  "icon": "FileSearchOutlined"
+}

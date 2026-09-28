@@ -16,6 +16,7 @@
 #include "fs_port_posix.h"        // for fsDirExists
 #include "handler_api.h"          // for handleApiAssignUnknown, handleApiA...
 #include "handler_api_fork.h"     // for handleApiBoxCmd
+#include "handler_rtnl_fork.h"    // for handleApiRtnlUnknownLog, handleApiRtnlUnknownClear
 #include "handler_cloud.h"        // for handleCloudClaim, handleCloudConte...
 #include "handler_reverse.h"      // for handleReverse
 #include "handler_rtnl.h"         // for handleRtnl
@@ -155,6 +156,8 @@ request_type_t request_paths[] = {
     {REQ_GET, "/api/getTagInfo", SERTY_WEB, &handleApiTagInfo},
     {REQ_GET, "/api/getBoxes", SERTY_WEB, &handleApiGetBoxes},
     {REQ_GET, "/api/box/cmd", SERTY_WEB, &handleApiBoxCmd},
+    {REQ_GET, "/api/fork/rtnl/log", SERTY_WEB, &handleApiRtnlUnknownLog},
+    {REQ_POST, "/api/fork/rtnl/clear", SERTY_WEB, &handleApiRtnlUnknownClear},
     {REQ_POST, "/api/assignUnknown", SERTY_WEB, &handleApiAssignUnknown},
     {REQ_GET, "/api/settings/getIndex", SERTY_WEB, &handleApiGetIndex},
     {REQ_GET, "/api/settings/get/", SERTY_WEB, &handleApiSettingsGet},
