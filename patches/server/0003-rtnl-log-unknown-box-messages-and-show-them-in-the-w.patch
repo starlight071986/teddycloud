@@ -1,0 +1,528 @@
+From 76c0a8e72f8e7da675b15f86c77167a23cb54c33 Mon Sep 17 00:00:00 2001
+From: starlight071986 <113560659+starlight071986@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 00:03:40 +0200
+Subject: [PATCH 3/3] rtnl: log unknown box messages and show them in the web
+ UI
+
+Every RTNL log2 group/function pair and log3 type that rtnlEvent() does
+not evaluate is appended as TSV to config/rtnl_unknown.log (rotated at
+1 MB to .1). Meant for reverse engineering further box data (e.g.
+battery level).
+
+- GET  /api/fork/rtnl/log    rotated + current file as text
+- POST /api/fork/rtnl/clear  delete both files
+- /fork/rtnl-log.html        viewer with summary per group/function,
+                             box filter, auto refresh and download
+- plugins/rtnlUnknownLog     menu entry under Tonieboxes (iframe)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ contrib/data/www/fork/rtnl-log.html           | 144 ++++++++++
+ .../www/plugins/rtnlUnknownLog/index.html     |  12 +
+ .../www/plugins/rtnlUnknownLog/plugin.json    |  10 +
+ include/handler_rtnl_fork.h                   |  13 +
+ src/handler_rtnl.c                            |   2 +
+ src/handler_rtnl_fork.c                       | 245 ++++++++++++++++++
+ src/server.c                                  |   3 +
+ 7 files changed, 429 insertions(+)
+ create mode 100644 contrib/data/www/fork/rtnl-log.html
+ create mode 100644 contrib/data/www/plugins/rtnlUnknownLog/index.html
+ create mode 100644 contrib/data/www/plugins/rtnlUnknownLog/plugin.json
+ create mode 100644 include/handler_rtnl_fork.h
+ create mode 100644 src/handler_rtnl_fork.c
+
+diff --git a/contrib/data/www/fork/rtnl-log.html b/contrib/data/www/fork/rtnl-log.html
+new file mode 100644
+index 0000000..862522d
+--- /dev/null
++++ b/contrib/data/www/fork/rtnl-log.html
+@@ -0,0 +1,144 @@
++<!doctype html>
++<html lang="de">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<title>Unbekannte Box-Meldungen</title>
++<style>
++  :root { --bg:#fff; --fg:#1f1f1f; --muted:#6b6b6b; --line:#e3e3e3; --head:#f5f5f5; --accent:#1677ff; --danger:#d4380d; }
++  @media (prefers-color-scheme: dark) { :root { --bg:#141414; --fg:#e6e6e6; --muted:#9a9a9a; --line:#303030; --head:#1f1f1f; --accent:#4096ff; --danger:#ff7a45; } }
++  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, sans-serif; }
++  h1 { font-size:18px; margin:0 0 4px; }
++  p.hint { color:var(--muted); margin:0 0 12px; }
++  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
++  button, select, input { font:inherit; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:var(--head); color:var(--fg); }
++  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
++  button.danger { color:var(--danger); }
++  h2 { font-size:15px; margin:16px 0 6px; }
++  .wrap { overflow-x:auto; border:1px solid var(--line); border-radius:6px; }
++  table { border-collapse:collapse; width:100%; }
++  th, td { padding:4px 8px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; vertical-align:top; }
++  th { background:var(--head); position:sticky; top:0; }
++  td.mono { font-family:ui-monospace, monospace; font-size:12px; white-space:normal; word-break:break-all; min-width:240px; }
++  tr.sel td { background:color-mix(in srgb, var(--accent) 15%, transparent); }
++  .muted { color:var(--muted); }
++</style>
++</head>
++<body>
++<h1>Unbekannte Box-Meldungen (RTNL)</h1>
++<p class="hint">Meldungen der Tonieboxen, die TeddyCloud nicht auswertet. Datei: <code>config/rtnl_unknown.log</code> (max. 2 × 1 MB).</p>
++
++<div class="bar">
++  <label>Box <select id="box"><option value="">alle</option></select></label>
++  <label><input type="checkbox" id="auto"> alle 10 s aktualisieren</label>
++  <button class="primary" id="reload">Aktualisieren</button>
++  <button id="download">Herunterladen</button>
++  <button class="danger" id="clear">Log leeren</button>
++  <span class="muted" id="status"></span>
++</div>
++
++<h2>Übersicht nach Gruppe/Funktion</h2>
++<div class="wrap"><table id="summary"><thead><tr>
++  <th>Typ</th><th>Gruppe</th><th>Funktion</th><th>Anzahl</th><th>Boxen</th><th>Zuletzt</th><th>Beispiel (hex)</th>
++</tr></thead><tbody></tbody></table></div>
++
++<h2>Letzte Meldungen <span class="muted" id="filterInfo"></span></h2>
++<div class="wrap"><table id="rows"><thead><tr>
++  <th>Zeit</th><th>Box</th><th>Typ</th><th>Gruppe</th><th>Funktion</th><th>Uptime</th><th>Länge</th><th>Payload (hex)</th><th>ASCII</th>
++</tr></thead><tbody></tbody></table></div>
++
++<script>
++(function () {
++  "use strict";
++  const API = "/api/fork/rtnl/log";
++  const MAX_ROWS = 500;
++  let raw = "", entries = [], filterKey = "", timer = null;
++  const $ = (id) => document.getElementById(id);
++
++  function parse(text) {
++    const out = [];
++    for (const line of text.split(/\r?\n/)) {
++      if (!line || line.startsWith("time\t")) continue;
++      const c = line.split("\t");
++      out.push({ time:c[0], cn:c[1], name:c[2], type:c[3], group:c[4], func:c[5], uptime:c[6],
++                 seq:c[7], len:c[9], hex:c[10], ascii:c[11] });
++    }
++    return out;
++  }
++
++  function td(text, cls) { const e = document.createElement("td"); e.textContent = text ?? ""; if (cls) e.className = cls; return e; }
++  function boxLabel(e) { return e.name ? e.name + " (" + e.cn + ")" : e.cn; }
++
++  function render() {
++    const box = $("box").value;
++    const list = entries.filter((e) => !box || e.cn === box);
++
++    const groups = new Map();
++    for (const e of list) {
++      const k = e.type + "|" + e.group + "|" + e.func;
++      const g = groups.get(k) || { e, count:0, boxes:new Set(), last:e };
++      g.count++; g.boxes.add(e.cn); g.last = e;
++      groups.set(k, g);
++    }
++    const sb = $("summary").tBodies[0]; sb.replaceChildren();
++    [...groups.entries()].sort((a, b) => b[1].count - a[1].count).forEach(([k, g]) => {
++      const tr = document.createElement("tr");
++      if (k === filterKey) tr.className = "sel";
++      tr.style.cursor = "pointer";
++      tr.title = "Klicken, um nur diese Meldungen zu zeigen";
++      tr.onclick = () => { filterKey = filterKey === k ? "" : k; render(); };
++      tr.append(td(g.e.type), td(g.e.group), td(g.e.func), td(g.count), td(g.boxes.size), td(g.last.time), td(g.last.hex, "mono"));
++      sb.append(tr);
++    });
++
++    const rows = list.filter((e) => !filterKey || (e.type + "|" + e.group + "|" + e.func) === filterKey).slice(-MAX_ROWS).reverse();
++    $("filterInfo").textContent = (filterKey ? "(gefiltert: " + filterKey.replace(/\|/g, " / ") + ") " : "") + "– " + rows.length + " von " + list.length;
++    const rb = $("rows").tBodies[0]; rb.replaceChildren();
++    for (const e of rows) {
++      const tr = document.createElement("tr");
++      tr.append(td(e.time), td(boxLabel(e)), td(e.type), td(e.group), td(e.func), td(e.uptime), td(e.len), td(e.hex, "mono"), td(e.ascii, "mono"));
++      rb.append(tr);
++    }
++  }
++
++  function fillBoxes() {
++    const sel = $("box"), cur = sel.value;
++    const boxes = new Map(entries.map((e) => [e.cn, boxLabel(e)]));
++    sel.replaceChildren(new Option("alle", ""));
++    for (const [cn, label] of boxes) sel.append(new Option(label, cn));
++    sel.value = boxes.has(cur) ? cur : "";
++  }
++
++  async function load() {
++    $("status").textContent = "lädt …";
++    try {
++      const r = await fetch(API, { cache:"no-store" });
++      if (!r.ok) throw new Error("HTTP " + r.status);
++      raw = await r.text();
++      entries = parse(raw);
++      fillBoxes(); render();
++      $("status").textContent = entries.length + " Meldungen, Stand " + new Date().toLocaleTimeString();
++    } catch (err) {
++      $("status").textContent = "Fehler: " + err.message;
++    }
++  }
++
++  $("reload").onclick = load;
++  $("box").onchange = render;
++  $("auto").onchange = (ev) => { clearInterval(timer); if (ev.target.checked) timer = setInterval(load, 10000); };
++  $("download").onclick = () => {
++    const a = document.createElement("a");
++    a.href = URL.createObjectURL(new Blob([raw], { type:"text/plain" }));
++    a.download = "rtnl_unknown_" + new Date().toISOString().replace(/[:.]/g, "-") + ".tsv";
++    a.click(); URL.revokeObjectURL(a.href);
++  };
++  $("clear").onclick = async () => {
++    if (!confirm("Log wirklich leeren?")) return;
++    await fetch("/api/fork/rtnl/clear", { method:"POST" });
++    filterKey = ""; load();
++  };
++  load();
++})();
++</script>
++</body>
++</html>
+diff --git a/contrib/data/www/plugins/rtnlUnknownLog/index.html b/contrib/data/www/plugins/rtnlUnknownLog/index.html
+new file mode 100644
+index 0000000..a4076c4
+--- /dev/null
++++ b/contrib/data/www/plugins/rtnlUnknownLog/index.html
+@@ -0,0 +1,12 @@
++<!doctype html>
++<html lang="de">
++<head>
++<meta charset="utf-8">
++<title>Unbekannte Box-Meldungen</title>
++<style>html, body, iframe { margin:0; border:0; width:100%; height:100%; } body { min-height:80vh; }</style>
++</head>
++<body>
++<!-- The viewer lives outside the plugins volume so it is updated with every image. -->
++<iframe src="/fork/rtnl-log.html" title="Unbekannte Box-Meldungen"></iframe>
++</body>
++</html>
+diff --git a/contrib/data/www/plugins/rtnlUnknownLog/plugin.json b/contrib/data/www/plugins/rtnlUnknownLog/plugin.json
+new file mode 100644
+index 0000000..2886c99
+--- /dev/null
++++ b/contrib/data/www/plugins/rtnlUnknownLog/plugin.json
+@@ -0,0 +1,10 @@
++{
++  "pluginName": "Unbekannte Box-Meldungen",
++  "author": "starlight071986",
++  "version": "1.0.0",
++  "description": "Zeigt RTNL-Meldungen der Tonieboxen, die TeddyCloud nicht auswertet (config/rtnl_unknown.log).",
++  "standalone": false,
++  "pluginHomepage": "https://github.com/starlight071986/teddycloud",
++  "teddyCloudSection": "tonieboxes",
++  "icon": "FileSearchOutlined"
++}
+diff --git a/include/handler_rtnl_fork.h b/include/handler_rtnl_fork.h
+new file mode 100644
+index 0000000..550d554
+--- /dev/null
++++ b/include/handler_rtnl_fork.h
+@@ -0,0 +1,13 @@
++#ifndef _HANDLER_RTNL_FORK_H
++#define _HANDLER_RTNL_FORK_H
++
++#include "handler.h"
++#include "proto/toniebox.pb.rtnl.pb-c.h"
++
++/* Append RTNL messages that teddyCloud does not evaluate to config/rtnl_unknown.log */
++void rtnlForkLogUnknown(TonieRtnlRPC *rpc, client_ctx_t *client_ctx);
++
++error_t handleApiRtnlUnknownLog(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
++error_t handleApiRtnlUnknownClear(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
++
++#endif
+diff --git a/src/handler_rtnl.c b/src/handler_rtnl.c
+index d35e80c..61b79ce 100644
+--- a/src/handler_rtnl.c
++++ b/src/handler_rtnl.c
+@@ -7,6 +7,7 @@
+ #include "mutex_manager.h"
+ #include "handler_sse.h"
+ #include "handler_rtnl.h"
++#include "handler_rtnl_fork.h"
+ #include "settings.h"
+ #include "stats.h"
+ #include "mqtt.h"
+@@ -136,6 +137,7 @@ error_t handleRtnl(HttpConnection *connection, const char_t *uri, const char_t *
+             rtnlEvent(connection, rpc, client_ctx);
+             rtnlEventLog(connection, rpc);
+             rtnlEventDump(connection, rpc, client_ctx->settings);
++            rtnlForkLogUnknown(rpc, client_ctx);
+         }
+         tonie_rtnl_rpc__free_unpacked(rpc, NULL);
+     } while (true);
+diff --git a/src/handler_rtnl_fork.c b/src/handler_rtnl_fork.c
+new file mode 100644
+index 0000000..8522315
+--- /dev/null
++++ b/src/handler_rtnl_fork.c
+@@ -0,0 +1,245 @@
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "handler_rtnl_fork.h"
++#include "handler_rtnl.h"
++#include "fs_port.h"
++#include "fs_ext.h"
++#include "mutex_manager.h"
++#include "server_helpers.h"
++#include "settings.h"
++
++#define RTNL_UNKNOWN_LOG_NAME "rtnl_unknown.log"
++#define RTNL_UNKNOWN_LOG_MAX_SIZE (1024 * 1024) /* rotate to .1 when exceeded */
++#define RTNL_UNKNOWN_PAYLOAD_MAX 512            /* bytes of payload written per line */
++
++typedef struct
++{
++    uint32_t group;
++    uint32_t function;
++} rtnl_fork_known_t;
++
++/* log2 group/function pairs evaluated in rtnlEvent() (handler_rtnl.c) */
++static const rtnl_fork_known_t rtnl_known_log2[] = {
++    {RTNL2_FUGR_TAG, RTNL2_FUNC_TAG_VALID_CC3200},
++    {RTNL2_FUGR_TAG, RTNL2_FUNC_TAG_VALID_REMOVED_CC3200},
++    {RTNL2_FUGR_TAG, RTNL2_FUNC_TAG_INVALID_CC3200},
++    {RTNL2_FUGR_TAG, RTNL2_FUNC_TAG_INVALID_ESP32},
++    {RTNL2_FUGR_TAG, RTNL2_FUNC_TAG_VALID_ESP32},
++    {RTNL2_FUGR_TAG, RTNL2_FUNC_TAG_VALID_REMOVED_ESP32},
++    {RTNL2_FUGR_AUDIO_A, RTNL2_FUNC_AUDIO_ID_CC3200},
++    {RTNL2_FUGR_AUDIO_A, RTNL2_FUNC_AUDIO_ID_ESP32},
++    {RTNL2_FUGR_AUDIO_B, RTNL2_FUNC_AUDIO_ID},
++    {RTNL2_FUGR_AUDIO_B, RTNL2_FUNC_AUDIO_PLAY},
++    {RTNL2_FUGR_TILT, RTNL2_FUNC_TILT_A_ESP32},
++    {RTNL2_FUGR_TILT, RTNL2_FUNC_TILT_B_ESP32},
++    {RTNL2_FUGR_VOLUME, RTNL2_FUNC_VOLUME_CHANGE_CC3200},
++    {RTNL2_FUGR_VOLUME, RTNL2_FUNC_VOLUME_CHANGE_ESP32},
++    {RTNL2_FUGR_FIRMWARE, RTNL2_FUNC_FIRMWARE_FULL_VERSION},
++    {RTNL2_FUGR_FIRMWARE, RTNL2_FUNC_FIRMWARE_VERSION},
++    {RTNL2_FUGR_FIRMWARE, RTNL2_FUNC_FIRMWARE_INFOS},
++    {RTNL2_FUGR_NETWORK_HTTP, RTNL2_FUNC_NETWORK_REGION},
++    {RTNL2_FUGR_NETWORK_HTTP, RTNL2_FUNC_NETWORK_DOMAIN},
++    {RTNL2_FUGR_NETWORK_TCP, RTNL2_FUNC_NETWORK_DOMAIN},
++};
++
++/* log3 types evaluated in rtnlEvent() */
++static const uint32_t rtnl_known_log3[] = {
++    RTNL3_TYPE_EAR_BIG,
++    RTNL3_TYPE_EAR_SMALL,
++    RTNL3_TYPE_KNOCK_FORWARD,
++    RTNL3_TYPE_KNOCK_BACKWARD,
++    RTNL3_TYPE_TILT_FORWARD,
++    RTNL3_TYPE_TILT_BACKWARD,
++    RTNL3_TYPE_CHARGER_ON,
++    RTNL3_TYPE_CHARGER_OFF,
++    RTNL3_TYPE_PLAYBACK_STARTING,
++    RTNL3_TYPE_PLAYBACK_STARTED,
++    RTNL3_TYPE_PLAYBACK_STOPPED,
++};
++
++static bool rtnlForkIsKnownLog2(uint32_t group, uint32_t function)
++{
++    for (size_t i = 0; i < sizeof(rtnl_known_log2) / sizeof(rtnl_known_log2[0]); i++)
++    {
++        if (rtnl_known_log2[i].group == group && rtnl_known_log2[i].function == function)
++        {
++            return true;
++        }
++    }
++    return false;
++}
++
++static bool rtnlForkIsKnownLog3(uint32_t type)
++{
++    for (size_t i = 0; i < sizeof(rtnl_known_log3) / sizeof(rtnl_known_log3[0]); i++)
++    {
++        if (rtnl_known_log3[i] == type)
++        {
++            return true;
++        }
++    }
++    return false;
++}
++
++static char *rtnlForkLogPath(const char *suffix)
++{
++    return custom_asprintf("%s%c%s%s", get_settings()->internal.configdirfull, PATH_SEPARATOR, RTNL_UNKNOWN_LOG_NAME, suffix);
++}
++
++/* hex + printable ascii of a payload, truncated to RTNL_UNKNOWN_PAYLOAD_MAX bytes */
++static void rtnlForkFormatBytes(const uint8_t *data, size_t len, char *hex, char *ascii)
++{
++    if (len > RTNL_UNKNOWN_PAYLOAD_MAX)
++    {
++        len = RTNL_UNKNOWN_PAYLOAD_MAX;
++    }
++    for (size_t i = 0; i < len; i++)
++    {
++        osSprintf(&hex[i * 2], "%02X", data[i]);
++        ascii[i] = (data[i] >= 0x20 && data[i] < 0x7F && data[i] != '\t') ? (char)data[i] : '.';
++    }
++    hex[len * 2] = '\0';
++    ascii[len] = '\0';
++}
++
++static void rtnlForkAppend(const char *line)
++{
++    char *path = rtnlForkLogPath("");
++    char *pathOld = rtnlForkLogPath(".1");
++
++    mutex_lock(MUTEX_RTNL_FILE);
++    uint32_t size = 0;
++    if (fsGetFileSize(path, &size) == NO_ERROR && size > RTNL_UNKNOWN_LOG_MAX_SIZE)
++    {
++        fsDeleteFile(pathOld);
++        fsRenameFile(path, pathOld);
++        size = 0;
++    }
++    bool isNew = !fsFileExists(path);
++    FsFile *file = fsOpenFileEx(path, "ab");
++    if (file)
++    {
++        if (isNew)
++        {
++            const char *header = "time\tbox_cn\tbox_name\ttype\tgroup\tfunction\tuptime\tsequence\tfield3\tlen\tpayload_hex\tpayload_ascii\tfield8\tfield9_hex\r\n";
++            fsWriteFile(file, (void *)header, osStrlen(header));
++        }
++        fsWriteFile(file, (void *)line, osStrlen(line));
++        fsCloseFile(file);
++    }
++    mutex_unlock(MUTEX_RTNL_FILE);
++
++    osFreeMem(path);
++    osFreeMem(pathOld);
++}
++
++void rtnlForkLogUnknown(TonieRtnlRPC *rpc, client_ctx_t *client_ctx)
++{
++    char time_str[64];
++    time_format_current(time_str);
++    const char *cn = client_ctx->settings->commonName ? client_ctx->settings->commonName : "";
++    const char *name = client_ctx->settings->boxName ? client_ctx->settings->boxName : "";
++
++    if (rpc->log2 && !rtnlForkIsKnownLog2(rpc->log2->function_group, rpc->log2->function))
++    {
++        TonieRtnlLog2 *log2 = rpc->log2;
++        char *hex = osAllocMem(RTNL_UNKNOWN_PAYLOAD_MAX * 2 + 1);
++        char *ascii = osAllocMem(RTNL_UNKNOWN_PAYLOAD_MAX + 1);
++        char *hex9 = osAllocMem(RTNL_UNKNOWN_PAYLOAD_MAX * 2 + 1);
++        char *ascii9 = osAllocMem(RTNL_UNKNOWN_PAYLOAD_MAX + 1);
++        if (hex && ascii && hex9 && ascii9)
++        {
++            char field8[16] = "";
++            rtnlForkFormatBytes(log2->field6.data, log2->field6.len, hex, ascii);
++            rtnlForkFormatBytes(log2->has_field9 ? log2->field9.data : NULL, log2->has_field9 ? log2->field9.len : 0, hex9, ascii9);
++            if (log2->has_field8)
++            {
++                osSprintf(field8, "%" PRIu32, log2->field8);
++            }
++            char *line = custom_asprintf("%s\t%s\t%s\tlog2\t%" PRIu32 "\t%" PRIu32 "\t%" PRIu64 "\t%" PRIu32 "\t%" PRIu32 "\t%" PRIuSIZE "\t%s\t%s\t%s\t%s\r\n",
++                                         time_str, cn, name,
++                                         log2->function_group, log2->function, log2->uptime, log2->sequence, log2->field3,
++                                         log2->field6.len, hex, ascii, field8, hex9);
++            rtnlForkAppend(line);
++            osFreeMem(line);
++        }
++        osFreeMem(hex);
++        osFreeMem(ascii);
++        osFreeMem(hex9);
++        osFreeMem(ascii9);
++    }
++
++    if (rpc->log3 && !rtnlForkIsKnownLog3(rpc->log3->field2))
++    {
++        char *line = custom_asprintf("%s\t%s\t%s\tlog3\t\t%" PRIu32 "\t\t\t\t\t%08" PRIX32 "\t\t\t\r\n",
++                                     time_str, cn, name, rpc->log3->field2, rpc->log3->datetime);
++        rtnlForkAppend(line);
++        osFreeMem(line);
++    }
++}
++
++static error_t rtnlForkAppendFile(const char *path, char *buf, size_t bufSize, size_t *pos)
++{
++    FsFile *file = fsOpenFile(path, FS_FILE_MODE_READ);
++    if (!file)
++    {
++        return ERROR_FILE_NOT_FOUND;
++    }
++    size_t read = 0;
++    while (*pos < bufSize && fsReadFile(file, &buf[*pos], bufSize - *pos, &read) == NO_ERROR && read > 0)
++    {
++        *pos += read;
++    }
++    fsCloseFile(file);
++    return NO_ERROR;
++}
++
++/* GET /api/fork/rtnl/log - rotated file (.1) followed by the current one, as plain text */
++error_t handleApiRtnlUnknownLog(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
++{
++    char *path = rtnlForkLogPath("");
++    char *pathOld = rtnlForkLogPath(".1");
++    size_t bufSize = 2 * RTNL_UNKNOWN_LOG_MAX_SIZE + 64 * 1024;
++    char *buf = osAllocMem(bufSize + 1);
++    size_t pos = 0;
++
++    if (buf)
++    {
++        mutex_lock(MUTEX_RTNL_FILE);
++        rtnlForkAppendFile(pathOld, buf, bufSize, &pos);
++        rtnlForkAppendFile(path, buf, bufSize, &pos);
++        mutex_unlock(MUTEX_RTNL_FILE);
++        buf[pos] = '\0';
++    }
++    osFreeMem(path);
++    osFreeMem(pathOld);
++
++    if (!buf)
++    {
++        return ERROR_OUT_OF_MEMORY;
++    }
++    httpPrepareHeader(connection, "text/plain; charset=utf-8", pos);
++    return httpWriteResponse(connection, buf, pos, true);
++}
++
++/* POST /api/fork/rtnl/clear */
++error_t handleApiRtnlUnknownClear(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
++{
++    char *path = rtnlForkLogPath("");
++    char *pathOld = rtnlForkLogPath(".1");
++
++    mutex_lock(MUTEX_RTNL_FILE);
++    fsDeleteFile(path);
++    fsDeleteFile(pathOld);
++    mutex_unlock(MUTEX_RTNL_FILE);
++    osFreeMem(path);
++    osFreeMem(pathOld);
++
++    TRACE_INFO("RTNL unknown log cleared\r\n");
++    char *response = "{\"success\":true}";
++    httpPrepareHeader(connection, "application/json; charset=utf-8", osStrlen(response));
++    return httpWriteResponseString(connection, response, false);
++}
+diff --git a/src/server.c b/src/server.c
+index e15a0d1..a2e5ec2 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -16,6 +16,7 @@
+ #include "fs_port_posix.h"        // for fsDirExists
+ #include "handler_api.h"          // for handleApiAssignUnknown, handleApiA...
+ #include "handler_api_fork.h"     // for handleApiBoxCmd
++#include "handler_rtnl_fork.h"    // for handleApiRtnlUnknownLog, handleApiRtnlUnknownClear
+ #include "handler_cloud.h"        // for handleCloudClaim, handleCloudConte...
+ #include "handler_reverse.h"      // for handleReverse
+ #include "handler_rtnl.h"         // for handleRtnl
+@@ -155,6 +156,8 @@ request_type_t request_paths[] = {
+     {REQ_GET, "/api/getTagInfo", SERTY_WEB, &handleApiTagInfo},
+     {REQ_GET, "/api/getBoxes", SERTY_WEB, &handleApiGetBoxes},
+     {REQ_GET, "/api/box/cmd", SERTY_WEB, &handleApiBoxCmd},
++    {REQ_GET, "/api/fork/rtnl/log", SERTY_WEB, &handleApiRtnlUnknownLog},
++    {REQ_POST, "/api/fork/rtnl/clear", SERTY_WEB, &handleApiRtnlUnknownClear},
+     {REQ_POST, "/api/assignUnknown", SERTY_WEB, &handleApiAssignUnknown},
+     {REQ_GET, "/api/settings/getIndex", SERTY_WEB, &handleApiGetIndex},
+     {REQ_GET, "/api/settings/get/", SERTY_WEB, &handleApiSettingsGet},

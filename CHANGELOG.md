@@ -10,11 +10,18 @@ Basis: Original [tc_v0.7.0](https://github.com/toniebox-reverse-engineering/tedd
 ### Hinzugefügt
 - REST-Endpunkt `GET /api/box/cmd?boxId=&cmd=&value=` für `stop`, `volLimitSpk`, `volLimitHdp`,
   `led`, `slapEnabled`, `slapDir`. War in MQTT_CONTROL.md dokumentiert, fehlte aber im Original.
+- Log für unbekannte Box-Meldungen (RTNL): Alles, was TeddyCloud nicht auswertet, landet mit
+  Box, Zeit und Rohdaten in `config/rtnl_unknown.log` (TSV, rotiert bei 1 MB).
+  Ansicht unter `/fork/rtnl-log.html` bzw. im Menü „Tonieboxen“ → „Unbekannte Box-Meldungen“,
+  mit Übersicht je Gruppe/Funktion, Box-Filter und Download.
+  API: `GET /api/fork/rtnl/log`, `POST /api/fork/rtnl/clear`.
 - Beispiel-Deployment mit Caddy-Reverse-Proxy und Login (`deploy/`).
 
 ### Geändert
 - `tonie_json.cache_images` ist ab Werk an: Figurenbilder werden beim ersten Aufruf lokal
-  gespeichert und danach ohne Online-CDN ausgeliefert.
+  gespeichert und danach ohne Online-CDN ausgeliefert. Gilt für Tonie-Übersicht, Suche und
+  Toniebox-Bilder. Noch nicht für `/api/toniesJson` (Rohdatei, u. a. Bildauswahl im
+  Custom-Tonie-Editor).
 
 ### Sicherheit
 - Hinweis: Der Web-Port des Originals hat keine Zugriffskontrolle. Nur hinter einem

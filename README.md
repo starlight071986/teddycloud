@@ -36,6 +36,12 @@ Das Original bleibt in jedem Versionsordner unverändert erreichbar:
 |---|---|
 | `0001-api-add-api-box-cmd-REST-endpoint` | `GET /api/box/cmd?boxId=&cmd=&value=` (in MQTT_CONTROL.md dokumentiert, im Original aber nicht vorhanden). Eigene Datei `src/handler_api_fork.c`, nur 2 Zeilen in `server.c`. |
 | `0002-settings-cache-figurine-images-locally-by-default` | `tonie_json.cache_images` ab Werk an: Bilder werden beim ersten Aufruf lokal gespeichert. Bestehende Installationen behalten ihren gespeicherten Wert. |
+| `0003-rtnl-log-unknown-box-messages-and-show-them-in-the-web-UI` | Unbekannte RTNL-Meldungen nach `config/rtnl_unknown.log`; Ansicht `/fork/rtnl-log.html` + Plugin im Menü „Tonieboxen“. |
+
+**Plugin bei bestehender Installation:** Das Plugin-Verzeichnis ist ein Docker-Volume und wird
+bei vorhandenen Volumes nicht aus dem Image aktualisiert. Einmalig vom Host kopieren:
+`docker cp tc_v0.7.0/contrib/data/www/plugins/rtnlUnknownLog teddycloud:/teddycloud/data/www/plugins/`
+Die Seite `/fork/rtnl-log.html` selbst liegt außerhalb der Volumes und ist immer aktuell.
 
 Befehle für `/api/box/cmd`: `stop`, `volLimitSpk` (0–3), `volLimitHdp` (0–3), `led` (0–2),
 `slapEnabled` (true/false), `slapDir` (true/false). `boxId` = Common Name der Box.

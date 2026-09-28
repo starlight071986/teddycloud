@@ -1,7 +1,7 @@
 From ecfca76f1a009e7a21dabb0244f6671b7c0fbcba Mon Sep 17 00:00:00 2001
 From: starlight071986 <113560659+starlight071986@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 23:56:38 +0200
-Subject: [PATCH 2/2] settings: cache figurine images locally by default
+Subject: [PATCH 2/3] settings: cache figurine images locally by default
 
 Images are downloaded on first request and served from data/cache
 afterwards, so the web UI no longer depends on the online CDN.
