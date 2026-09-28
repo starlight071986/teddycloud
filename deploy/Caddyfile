@@ -1,0 +1,11 @@
+# Password hash:  docker run --rm caddy:2 caddy hash-password --plaintext 'YOUR-PASSWORD'
+# Put the result into .env in single quotes: TC_PASSWORD_HASH='$2a$14$...'
+:80 {
+	basic_auth {
+		{$TC_USER} {$TC_PASSWORD_HASH}
+	}
+	# SSE (/api/sse) must not be buffered
+	reverse_proxy teddycloud:80 {
+		flush_interval -1
+	}
+}

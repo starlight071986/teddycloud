@@ -1,0 +1,50 @@
+# TeddyCloud fork behind a Caddy reverse proxy with login.
+#
+# - 443  -> TeddyCloud box API directly (Tonieboxes, secured by client certificates;
+#           must NOT go through the proxy, the box can't do basic auth)
+# - 80   -> Caddy -> TeddyCloud web UI + /api (basic auth required)
+# TeddyCloud's own web ports (80/8443) are NOT published, only reachable via Caddy.
+#
+# Setup: copy .env.example to .env, set the password hash (see Caddyfile), then:
+#   docker compose up -d
+services:
+  teddycloud:
+    container_name: teddycloud
+    hostname: teddycloud
+    image: ${TEDDYCLOUD_IMAGE:-teddycloud-fork:tc_v0.7.0-fork}
+    ports:
+      - "443:443"
+    volumes:
+      - certs:/teddycloud/certs
+      - config:/teddycloud/config
+      - content:/teddycloud/data/content
+      - library:/teddycloud/data/library
+      - custom_img:/teddycloud/data/www/custom_img
+      - firmware:/teddycloud/data/firmware
+      - cache:/teddycloud/data/cache
+      - plugins:/teddycloud/data/www/plugins
+    restart: unless-stopped
+
+  proxy:
+    image: caddy:2
+    container_name: teddycloud-proxy
+    ports:
+      - "80:80"
+    environment:
+      - TC_USER=${TC_USER:-admin}
+      - TC_PASSWORD_HASH=${TC_PASSWORD_HASH:?set TC_PASSWORD_HASH in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - teddycloud
+    restart: unless-stopped
+
+volumes:
+  certs:
+  config:
+  content:
+  library:
+  custom_img:
+  firmware:
+  cache:
+  plugins:

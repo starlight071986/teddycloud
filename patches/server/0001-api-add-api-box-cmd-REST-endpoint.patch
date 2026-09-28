@@ -1,0 +1,137 @@
+From 11fb3a9f1d0eeda28995f5aa516dfb88adfc3ebd Mon Sep 17 00:00:00 2001
+From: starlight071986 <113560659+starlight071986@users.noreply.github.com>
+Date: Mon, 28 Sep 2026 23:56:38 +0200
+Subject: [PATCH 1/2] api: add /api/box/cmd REST endpoint
+
+MQTT_CONTROL.md documents GET /api/box/cmd?boxId=&cmd=&value= but the
+route was never registered. Implemented in a separate file to keep the
+patch small when rebasing onto new upstream releases.
+
+No own authentication: like every other /api route it relies on the
+web port being protected (e.g. reverse proxy with auth).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/handler_api_fork.h |  8 ++++
+ src/handler_api_fork.c     | 76 ++++++++++++++++++++++++++++++++++++++
+ src/server.c               |  2 +
+ 3 files changed, 86 insertions(+)
+ create mode 100644 include/handler_api_fork.h
+ create mode 100644 src/handler_api_fork.c
+
+diff --git a/include/handler_api_fork.h b/include/handler_api_fork.h
+new file mode 100644
+index 0000000..b6a5623
+--- /dev/null
++++ b/include/handler_api_fork.h
+@@ -0,0 +1,8 @@
++#ifndef _HANDLER_API_FORK_H
++#define _HANDLER_API_FORK_H
++
++#include "handler.h"
++
++error_t handleApiBoxCmd(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx);
++
++#endif
+diff --git a/src/handler_api_fork.c b/src/handler_api_fork.c
+new file mode 100644
+index 0000000..eeeb28b
+--- /dev/null
++++ b/src/handler_api_fork.c
+@@ -0,0 +1,76 @@
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "handler_api_fork.h"
++#include "server_helpers.h"
++#include "settings.h"
++#include "toniebox_state.h"
++
++/* GET /api/box/cmd?boxId={commonName}&cmd={command}&value={value}
++ * Same commands as the MQTT command entities (see MQTT_CONTROL.md). */
++error_t handleApiBoxCmd(HttpConnection *connection, const char_t *uri, const char_t *queryString, client_ctx_t *client_ctx)
++{
++    char boxId[64] = "";
++    char cmd[32] = "";
++    char value[16] = "";
++    char response[128];
++    bool success = false;
++
++    queryGet(queryString, "boxId", boxId, sizeof(boxId));
++    queryGet(queryString, "cmd", cmd, sizeof(cmd));
++    queryGet(queryString, "value", value, sizeof(value));
++
++    uint8_t overlay_id = get_overlay_id(boxId);
++    if (overlay_id == 0)
++    {
++        TRACE_WARNING("Box cmd: unknown boxId '%s'\r\n", boxId);
++        osSnprintf(response, sizeof(response), "{\"success\":false,\"error\":\"unknown boxId\"}");
++        httpPrepareHeader(connection, "application/json; charset=utf-8", osStrlen(response));
++        connection->response.statusCode = 404;
++        return httpWriteResponseString(connection, response, false);
++    }
++
++    uint32_t num = (uint32_t)strtoul(value, NULL, 10);
++    bool flag = !strcasecmp(value, "true") || !strcmp(value, "1") || !strcasecmp(value, "on");
++
++    if (!strcmp(cmd, "stop"))
++    {
++        success = tbs_cmd_stop(overlay_id);
++    }
++    else if (!strcmp(cmd, "volLimitSpk"))
++    {
++        success = tbs_cmd_set_vol_limit_spk(overlay_id, num);
++    }
++    else if (!strcmp(cmd, "volLimitHdp"))
++    {
++        success = tbs_cmd_set_vol_limit_hdp(overlay_id, num);
++    }
++    else if (!strcmp(cmd, "led"))
++    {
++        success = tbs_cmd_set_led(overlay_id, num);
++    }
++    else if (!strcmp(cmd, "slapEnabled"))
++    {
++        success = tbs_cmd_set_slap_enabled(overlay_id, flag);
++    }
++    else if (!strcmp(cmd, "slapDir"))
++    {
++        success = tbs_cmd_set_slap_dir(overlay_id, flag);
++    }
++    else
++    {
++        TRACE_WARNING("Box cmd: unknown cmd '%s'\r\n", cmd);
++    }
++
++    TRACE_INFO("Box cmd '%s' value '%s' on '%s': %s\r\n", cmd, value, boxId, success ? "OK" : "FAILED");
++    osSnprintf(response, sizeof(response), "{\"success\":%s}", success ? "true" : "false");
++    httpPrepareHeader(connection, "application/json; charset=utf-8", osStrlen(response));
++    if (!success)
++    {
++        connection->response.statusCode = 400;
++    }
++    return httpWriteResponseString(connection, response, false);
++}
+diff --git a/src/server.c b/src/server.c
+index 97553a1..e15a0d1 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -15,6 +15,7 @@
+ #include "error.h"                // for NO_ERROR, error2text, ERROR_FAILURE
+ #include "fs_port_posix.h"        // for fsDirExists
+ #include "handler_api.h"          // for handleApiAssignUnknown, handleApiA...
++#include "handler_api_fork.h"     // for handleApiBoxCmd
+ #include "handler_cloud.h"        // for handleCloudClaim, handleCloudConte...
+ #include "handler_reverse.h"      // for handleReverse
+ #include "handler_rtnl.h"         // for handleRtnl
+@@ -153,6 +154,7 @@ request_type_t request_paths[] = {
+     {REQ_GET, "/api/getTagIndex", SERTY_WEB, &handleApiTagIndex},
+     {REQ_GET, "/api/getTagInfo", SERTY_WEB, &handleApiTagInfo},
+     {REQ_GET, "/api/getBoxes", SERTY_WEB, &handleApiGetBoxes},
++    {REQ_GET, "/api/box/cmd", SERTY_WEB, &handleApiBoxCmd},
+     {REQ_POST, "/api/assignUnknown", SERTY_WEB, &handleApiAssignUnknown},
+     {REQ_GET, "/api/settings/getIndex", SERTY_WEB, &handleApiGetIndex},
+     {REQ_GET, "/api/settings/get/", SERTY_WEB, &handleApiSettingsGet},
